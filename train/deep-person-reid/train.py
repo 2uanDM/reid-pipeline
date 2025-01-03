@@ -3,6 +3,8 @@ import argparse
 
 def parse_args():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", default="train", help="Train or test")
+    parser.add_argument("--weight", default="", help="Path to checkpoint")
     parser.add_argument("--datadir", required=True, help="Path to reid dataset")
     parser.add_argument("--source", default="cuhk03", help="Source dataset")
     parser.add_argument("--target", default="cuhk03", help="Target dataset")
@@ -23,7 +25,6 @@ def parse_args():
         "--eval-freq", type=int, default=10, help="Evaluation frequency"
     )
     parser.add_argument("--print-freq", type=int, default=10, help="Print frequency")
-    parser.add_argument("--save-dir", default="log/resnet50", help="Save directory")
     return parser.parse_args()
 
 
@@ -49,7 +50,7 @@ def main():
         name=args.model,
         num_classes=datamanager.num_train_pids,
         loss=args.loss,
-        pretrained=False,
+        pretrained=True,
     )
 
     model = model.cuda()
@@ -64,13 +65,25 @@ def main():
         datamanager, model, optimizer=optimizer, scheduler=scheduler, label_smooth=True
     )
 
-    engine.run(
-        save_dir=args.save_dir,
-        max_epoch=args.max_epoch,
-        eval_freq=args.eval_freq,
-        print_freq=args.print_freq,
-        test_only=False,
-    )
+    if args.mode == "train":
+        engine.run(
+            save_dir=f"log/{args.model}",
+            max_epoch=args.max_epoch,
+            eval_freq=args.eval_freq,
+            print_freq=args.print_freq,
+        )
+    else:
+        # Load weights from checkpoint
+        if args.weight:
+            torchreid.utils.load_pretrained_weights(model, args.weight)
+
+        engine.run(
+            save_dir=f"log/{args.model}",
+            max_epoch=args.max_epoch,
+            eval_freq=args.eval_freq,
+            print_freq=args.print_freq,
+            test_only=True,
+        )
 
 
 if __name__ == "__main__":
