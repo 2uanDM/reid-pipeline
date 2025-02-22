@@ -7,7 +7,7 @@ load_dotenv(override=True)
 
 
 class Settings(BaseSettings):
-    YOLO_MODEL_PATH: str = os.path.join(os.getcwd(), "data/weights/yolov10n_body.pt")
+    YOLO_MODEL_PATH: str = os.path.join(os.getcwd(), "src/assets/models/detect.pt")
     SERVER_ADDR: str = "tcp://localhost:5555"
     ASYNC_MODE: bool = True
     MODEL_PATH: str = "src/assets/models/mbnv2_128x64"
