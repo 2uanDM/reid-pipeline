@@ -98,9 +98,9 @@ def reset_config(cfg, args):
 
 def check_cfg(cfg):
     if cfg.loss.name == "triplet" and cfg.loss.triplet.weight_x == 0:
-        assert (
-            cfg.train.fixbase_epoch == 0
-        ), "The output of classifier is not included in the computational graph"
+        assert cfg.train.fixbase_epoch == 0, (
+            "The output of classifier is not included in the computational graph"
+        )
 
 
 def main():
@@ -164,6 +164,10 @@ def main():
         pretrained=cfg.model.pretrained,
         use_gpu=cfg.use_gpu,
     )
+
+    if cfg.use_gpu:
+        model = nn.DataParallel(model).cuda()
+
     num_params, flops = compute_model_complexity(
         model, (1, 3, cfg.data.height, cfg.data.width)
     )
@@ -171,9 +175,6 @@ def main():
 
     if cfg.model.load_weights and check_isfile(cfg.model.load_weights):
         load_pretrained_weights(model, cfg.model.load_weights)
-
-    if cfg.use_gpu:
-        model = nn.DataParallel(model).cuda()
 
     optimizer = torchreid.optim.build_optimizer(model, **optimizer_kwargs(cfg))
     scheduler = torchreid.optim.build_lr_scheduler(

@@ -29,8 +29,9 @@ train:
 
 test:
   batch_size: 300
-  dist_metric: 'euclidean'
+  # dist_metric: 'euclidean'
+  dist_metric: 'cosine'
   normalize_feature: False
-  evaluate: False
+  evaluate: True
   eval_freq: -1
-  rerank: False
+  rerank: True
