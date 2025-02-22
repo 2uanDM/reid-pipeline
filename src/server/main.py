@@ -13,7 +13,7 @@ from rich.console import Console
 from src.core.config import settings
 from src.deeputils.base_track import BaseTrack
 from src.deeputils.bytetracker import BYTETracker
-from src.utils.embeddings import extract_embedding
+from src.utils.embeddings import BatchGetEmbeddingsExecutor, extract_embedding
 from src.utils.logger import Logger
 from src.utils.schemas import PersonID, PersonIDsStorage
 
@@ -23,10 +23,31 @@ console = Console()
 
 
 class MainServer:
-    def __init__(self):
+    def __init__(
+        self,
+        **kwargs,
+    ):
         self.receiver = None
         self.video_writer = None
+
         self.storage = PersonIDsStorage()
+
+        # Store the video writer for each session (source) and the tracked IDs for each session
+        self.sessions_storage = {}
+
+        # Batch processing
+        self.max_batch_size = kwargs.get(
+            "batch_processing_size", settings.BATCH_PROCESSING_SIZE
+        )
+        self.max_thread = kwargs.get("threads", settings.THREADS)
+
+        self.batch_get_embeddings_executor = BatchGetEmbeddingsExecutor(
+            max_batch_size=self.max_batch_size,
+            max_thread=self.max_thread,
+        )
+
+        # Benchmark purposes
+        self.log_step = [10, 40, 100, 200, 400]
 
     def init_receiver(self) -> bool:
         try:

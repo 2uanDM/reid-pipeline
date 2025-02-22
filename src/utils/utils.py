@@ -8,7 +8,7 @@ import torchvision
 from tqdm import tqdm
 
 logging.basicConfig(
-    filename="example.log", level=logging.INFO, format="%(asctime)s - %(message)s"
+    filename="logs/example.log", level=logging.INFO, format="%(asctime)s - %(message)s"
 )
 
 
