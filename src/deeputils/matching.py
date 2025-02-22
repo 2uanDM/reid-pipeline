@@ -8,7 +8,7 @@ from scipy.spatial.distance import cdist
 from src.deeputils import kalman_filter
 
 logging.basicConfig(
-    filename="example.log", level=logging.INFO, format="%(asctime)s - %(message)s"
+    filename="logs/example.log", level=logging.INFO, format="%(asctime)s - %(message)s"
 )
 
 

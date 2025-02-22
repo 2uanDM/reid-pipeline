@@ -10,7 +10,7 @@ from src.core.config import settings
 
 # Cấu hình logging
 logging.basicConfig(
-    filename="example.log", level=logging.INFO, format="%(asctime)s - %(message)s"
+    filename="logs/example.log", level=logging.INFO, format="%(asctime)s - %(message)s"
 )
 
 

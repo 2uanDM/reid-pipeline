@@ -10,7 +10,7 @@ from src.deeputils.base_track import BaseTrack, TrackState
 from src.deeputils.kalman_filter import KalmanFilter
 
 logging.basicConfig(
-    filename="example.log", level=logging.INFO, format="%(asctime)s - %(message)s"
+    filename="logs/example.log", level=logging.INFO, format="%(asctime)s - %(message)s"
 )
 
 

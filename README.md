@@ -1,5 +1,6 @@
 # Person Re-Identification Optimized Pipeline
-This repository represents the work for paper *"Person Re-Identification with Edge Devices: Effectively utilizing Computing Resource with Frame Skipping and Batch Processing mechanism"*
+This repository represents the work for paper *"Real-Time Person Re-Identification and Tracking
+on Edge Devices with Distributed Optimization"*
 
 ## 🚀 Dependencies Installation
 
@@ -8,16 +9,19 @@ This repository represents the work for paper *"Person Re-Identification with Ed
 pip install uv
 ```
 
-`uv` is a python framework manager like `pip`, but written in Rust. It is faster than `pip` and can be used to install python packages parallelly.
-
-From now, whenever adding a new dependency, use `uv` to install it by just adding the package name to `requirements.txt` and run the following command.
-
 2. Install dependencies
 ```bash
 uv pip install -r requirements.txt
 ```
 
-3. Docker services (`Kafka`)
+3. Docker services (`Kafka` & Redis)
 ```bash
 docker compose up -d
+```
+
+## 📦 Dataset Preparation
+
+1. Download the dataset and copy it to `src/assets` folder
+```bash
+
 ```
