@@ -1,10 +1,15 @@
 import functools
 import logging
+import os
 import sys
 import traceback
+from datetime import datetime
 from typing import Any
 
 from pythonjsonlogger import jsonlogger
+
+log_dir = "logs"
+os.makedirs(log_dir, exist_ok=True)
 
 
 class Logger:
@@ -20,14 +25,23 @@ class Logger:
         self.logger = logging.getLogger(name)
         self.logger.setLevel(logging.INFO)
 
-        # Console handler
-        console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setLevel(logging.INFO)
         formatter = jsonlogger.JsonFormatter(
             "%(asctime)s %(levelname)s %(name)s %(message)s"
         )
+
+        # Console handler
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(logging.INFO)
         console_handler.setFormatter(formatter)
         self.logger.addHandler(console_handler)
+
+        # File handler
+        file_handler = logging.FileHandler(
+            f"{log_dir}/{datetime.now().strftime('%Y-%m-%d')}.log"
+        )
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(formatter)
+        self.logger.addHandler(file_handler)
 
     def info(self, message, extra=None):
         self.logger.info(message, extra=extra)

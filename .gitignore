@@ -172,3 +172,5 @@ cython_debug/
 poetry.lock
 log
 output
+src/assets/*
+!src/assets/.gitkeep

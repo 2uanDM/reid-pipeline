@@ -16,7 +16,6 @@
     with limited time cost.
 """
 
-import numpy as np
 import torch
 
 import gnn_propagate
