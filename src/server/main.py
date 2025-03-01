@@ -40,6 +40,7 @@ class MainServer:
             "batch_processing_size", settings.BATCH_PROCESSING_SIZE
         )
         self.max_thread = kwargs.get("threads", settings.THREADS)
+
         self.batch_get_embeddings_executor = BatchGetEmbeddingsExecutor(
             max_batch_size=self.max_batch_size,
             max_thread=self.max_thread,
@@ -50,6 +51,7 @@ class MainServer:
             self.benchmark = True
         else:
             self.benchmark = False
+            
         self.log_step = [10, 40, 100, 200, 400]
 
     def init_receiver(self) -> bool:
