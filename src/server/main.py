@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import time
 import traceback
 from datetime import datetime
 from typing import List
@@ -13,6 +14,7 @@ from rich.console import Console
 from src.core.config import settings
 from src.deeputils.base_track import BaseTrack
 from src.deeputils.bytetracker import BYTETracker
+from src.utils.benchmark import BenchmarkMultiThread
 from src.utils.embeddings import BatchGetEmbeddingsExecutor, extract_embedding
 from src.utils.logger import Logger
 from src.utils.schemas import PersonID, PersonIDsStorage
@@ -28,8 +30,6 @@ class MainServer:
         **kwargs,
     ):
         self.receiver = None
-        self.video_writer = None
-
         self.storage = PersonIDsStorage()
 
         # Store the video writer for each session (source) and the tracked IDs for each session
@@ -40,13 +40,16 @@ class MainServer:
             "batch_processing_size", settings.BATCH_PROCESSING_SIZE
         )
         self.max_thread = kwargs.get("threads", settings.THREADS)
-
         self.batch_get_embeddings_executor = BatchGetEmbeddingsExecutor(
             max_batch_size=self.max_batch_size,
             max_thread=self.max_thread,
         )
 
         # Benchmark purposes
+        if kwargs.get("benchmark"):
+            self.benchmark = True
+        else:
+            self.benchmark = False
         self.log_step = [10, 40, 100, 200, 400]
 
     def init_receiver(self) -> bool:
@@ -55,12 +58,12 @@ class MainServer:
                 open_port="tcp://localhost:5555", REQ_REP=False
             )
         except Exception:
-            console.print(
+            console.log(
                 f"[bold red]Error[/bold red] when initializing Image Receiver: {traceback.format_exc()}"
             )
             return False
         else:
-            console.print(
+            console.log(
                 "[bold cyan]Image Receiver[/bold cyan] initialized [bold green]successfully[/bold green] :vampire:"
             )
             return True
@@ -199,75 +202,179 @@ class MainServer:
                 )
                 break
 
+    @property
+    def current_time_str(self):
+        return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+    def handle_start_frame(
+        self,
+        fourcc: int,
+        metadata: dict,
+        session_id: str,
+    ):
+        """
+        Handle the start frame of a session
+
+        Args:
+            fourcc: The fourcc codec for the video writer
+            metadata: The metadata of the session
+            session_id: The ID of the session
+            session_storage: The storage for the current session
+
+        Each session will look like this:
+        ```json
+        {
+            "video_writer": cv2.VideoWriter,
+            "byte_tracker": BYTETracker,
+            "save_dir": str,
+            "tracked_ids": np.array,
+            "tracking_results": dict,
+        }
+        ```
+        """
+        console.log(
+            f"[bold cyan]Start[/bold cyan] processing video: {metadata.get('source')}"
+        )
+        console.log(
+            f"[bold cyan]Metadata[/bold cyan]: {json.dumps(metadata, indent=2)}"
+        )
+        logging.info(f"Base track count {BaseTrack._count}")
+
+        # Init the video writer
+        if session_id not in self.sessions_storage:
+            save_dir = f"trash/{self.current_time_str}_{session_id}"
+            os.makedirs(save_dir, exist_ok=True)
+
+            save_path = f"{save_dir}/{os.path.basename(metadata.get('source'))}.mp4"
+
+            self.sessions_storage[session_id] = {
+                "video_writer": cv2.VideoWriter(
+                    save_path,
+                    fourcc,
+                    metadata.get("fps"),
+                    (
+                        int(metadata.get("shape")[0]),
+                        int(metadata.get("shape")[1]),
+                    ),
+                ),
+                "byte_tracker": BYTETracker(),
+                "save_dir": save_dir,
+                "tracked_ids": np.array([], dtype=np.int32),
+                "tracking_results": {},
+                "start_time": time.perf_counter(),
+                "previous_boxes": None,
+                "previous_scores": None,
+            }
+
+            # Start logging the benchmark data
+            if self.benchmark:
+                self.sessions_storage[session_id]["benchmark"] = {
+                    "executor": BenchmarkMultiThread(),
+                    "data": {},
+                }
+                self.sessions_storage[session_id]["benchmark"][
+                    "executor"
+                ].start_logging()
+
+            console.log(
+                f"Save dir for session [bold green]{session_id}[/bold green]: {save_dir}"
+            )
+
     def run(self):
-        print(self.init_receiver())
         if not self.init_receiver():
             return
 
         bytetrack = BYTETracker()
-        tracked_ids = np.array([], dtype=np.int32)
-        output_file = "/home/quan/codes/reid-2024/app/assets/output_vid/vanh5.mp4"
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        time_now = datetime.now().strftime("%Y-%m-%d %H-%M-%S")
+
+        tracked_ids = np.array([], dtype=np.int32)
         tracking_results = {}
-        sessions = {}
         previous_boxes = []
         previous_scores = []
-        # Store the video writer for each session (source)
+
         while True:
             info, opencv_image = self.receiver.recv_image()
-
             info = json.loads(info)
+
+            detections = info.get("detections")
             metadata = info.get("metadata")
+            session_id = info.get("session_id")
             is_skipped = info.get("is_skipped")
+
             if metadata:
                 frame_number = metadata.get("frame", [])
             else:
-                print("No metadata")  # End last frame
-
-            session_id = info.get("session_id")
-            # logging.info(f"metadata: {metadata}")
-
-            print(f"frame:{frame_number}")
+                console.log("[bold red]No Metadata[/bold red]")
 
             if info.get("status") == "start":
-                console.print(
-                    f"[bold cyan]Start[/bold cyan] processing video: {metadata.get('source')}"
-                )
-                console.print(f"[bold cyan]Metadata[/bold cyan]: {metadata}")
-                logging.info(f"basetrack count {BaseTrack._count}")
-                # Init the video writer
-                time_now = datetime.now().strftime("%Y-%m-%d %H-%M-%S")
+                self.step_ids = 0
 
-                if session_id not in sessions:
-                    video_writer = cv2.VideoWriter(
-                        f"trash/{time_now}-{session_id}-{os.path.basename(metadata.get('source'))}.mp4",
-                        fourcc,
-                        metadata.get("fps"),
-                        (
-                            int(metadata.get("shape")[0]),
-                            int(metadata.get("shape")[1]),
-                        ),
-                    )
-                    console.print(
-                        f"Video Writer for session [bold green]{session_id}[/bold green] initialized"
-                    )
-                    sessions[session_id] = video_writer
+                self.handle_start_frame(
+                    fourcc=fourcc,
+                    metadata=metadata,
+                    session_id=session_id,
+                )
 
             elif info.get("status") == "running":
-                if session_id in sessions:
-                    logging.info(f"frame_number: {frame_number + 1}")
+                self.step_ids = 0
 
-                    video_writer = sessions.get(session_id)
+                if self.benchmark and self.step_ids in self.log_step:
+                    executor: BenchmarkMultiThread = self.sessions_storage[session_id][
+                        "benchmark"
+                    ]["executor"]["executor"]
 
-                    # is_skipped=False
+                    data = executor.calculate_averages()
+
+                    console.log(f"Usage at step {self.step_ids}: {data}")
+
+                    # Store the benchmark data
+                    self.sessions_storage[session_id]["benchmark"]["data"][
+                        self.step_ids
+                    ] = data
+
+                # BATCH PROCESSING MECHANISM - Accumulate frames until the batch is full
+                console.log(
+                    f"[bold yellow][ACCUMULATING][/bold yellow] frame:{frame_number} of session [bold cyan]{session_id}[/bold cyan]"
+                )
+
+                if opencv_image is not None and (
+                    not self.batch_get_embeddings_executor.queue_is_full
+                ):
+                    self.batch_get_embeddings_executor.add(
+                        image=opencv_image,
+                        detections=detections,
+                        metadata=metadata,
+                        session_id=session_id,
+                    )
+                    continue  # Continue accumulating until the batch is full
+
+                # Process the batch to get embeddings
+                # Here batch_result_frames is a list of results for each frame in the batch also sorted by the original order when they are added
+                console.log("[bold green]Processing batch[/bold green]")
+
+                _time = time.time()
+                batch_result_frames = self.batch_get_embeddings_executor.process()
+                console.print(f"Processing time: {time.time() - _time}s")
+
+                # Continue the flow with the processed frames
+                for frame_result in batch_result_frames:
+                    current_persons: List[PersonID] = frame_result.get("persons", [])
+                    metadata = frame_result.get("metadata", {})
+                    session_id: str = frame_result.get("session_id")
+                    frame_number: int = metadata.get("frame")
+                    # original_image: np.ndarray = frame_result.get("original_image")
+                    is_skipped: bool = frame_result.get("is_skipped")
+                    video_writer: cv2.VideoWriter = self.sessions_storage[session_id][
+                        "video_writer"
+                    ]
+
+                    # Detach all the embedding of current_persons
+                    for person in current_persons:
+                        person.fullbody_embedding = (
+                            person.fullbody_embedding.detach().cpu().numpy()
+                        )
+
                     if not is_skipped:
-                        bodys = self.get_face_body_from_detection(opencv_image, info)
-
-                        current_persons = self.extract_embeddings(
-                            opencv_image, bodys
-                        )  # Return list of PersonID
-
                         boxes = np.asarray(
                             [
                                 current_person.fullbody_bbox
@@ -280,7 +387,6 @@ class MainServer:
                                 for current_person in current_persons
                             ]
                         )
-
                         track_bodys = np.asarray(
                             [
                                 current_person.fullbody_embedding
@@ -402,7 +508,6 @@ class MainServer:
                             result_img = opencv_image
 
                     else:
-                        # print(f"previous box:{previous_boxes}")
                         if previous_boxes is not None:
                             bboxes, scores, ids = bytetrack.update(
                                 previous_boxes, previous_scores, track_bodys=None
@@ -416,11 +521,7 @@ class MainServer:
                                 )
                             else:
                                 result_img = opencv_image
-                    if self.video_writer is None:
-                        h, w = opencv_image.shape[:2]
-                        self.video_writer = cv2.VideoWriter(
-                            output_file, fourcc, 30, (w, h)
-                        )
+
                     text = f"Frame: {frame_number}"
                     cv2.putText(
                         result_img,
@@ -431,23 +532,37 @@ class MainServer:
                         (0, 255, 0),
                         1,
                     )
-                    self.video_writer.write(result_img)
+                    video_writer.write(result_img)
 
                 else:
                     print(f"Session {session_id}")
 
             elif info.get("status") == "end":
-                # output_file = "tracking_results.txt"
-                # with open(output_file, "w") as f:
-                #     for frame_number, detections in tracking_results.items():
-                #         for det in detections:
-                #             line = f"{frame_number},{det['track_id']},{det['x_min'] * 2},{det['y_min'] * 2},{det['x_max'] * 2 - det['x_min'] * 2},{det['y_max'] * 2 - det['y_min'] * 2}, {det['confidence']}\n"
-                #             f.write(line)
+                # Get session data
+                session_data = self.sessions_storage.pop(session_id, None)
 
-                self.video_writer = sessions.pop(session_id, None)
-                console.print(
-                    f"[bold magenta]End processing video: {session_id}[/bold magenta]"
-                )
+                if session_data:
+                    # Clean up video writer
+                    if session_data["video_writer"]:
+                        session_data["video_writer"].release()
 
-                # Reset the video writer
-                self.video_writer = None
+                    # Calculate and log processing time
+                    processing_time = time.perf_counter() - session_data["start_time"]
+                    console.log(
+                        f"[bold magenta]Finished processing session: {session_id}[/bold magenta]"
+                        f"\nTotal processing time: {processing_time:.2f} seconds"
+                    )
+
+                    # Log benchmark data if enabled
+                    if self.benchmark and "benchmark" in session_data:
+                        benchmark_data = session_data["benchmark"]["data"]
+                        console.log(
+                            f"Benchmark results: {json.dumps(benchmark_data, indent=2)}"
+                        )
+
+                    # Clear session resources
+                    del session_data
+                else:
+                    console.log(
+                        f"[bold red]Warning:[/bold red] No session data found for {session_id}"
+                    )

@@ -174,3 +174,4 @@ log
 output
 src/assets/*
 !src/assets/.gitkeep
+trash

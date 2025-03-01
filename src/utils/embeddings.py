@@ -57,24 +57,18 @@ def extract_embeddings_for_persons(image: np.ndarray, faces: list, bodys: list):
 
         # Prepare input for BYTETrack (bbox, confidence, body_embedding)
         bbox = body.get("bbox")
-        face = body.get("face", [])
 
         full_body_embedding = extract_embedding(
             [image[bbox[1] : bbox[1] + bbox[3], bbox[0] : bbox[0] + bbox[2]]],
             async_mode=settings.ASYNC_MODE,
         )
 
-        face_embed = None
         confidence = body.get("score")
-        face_confidence = body.get("face_conf", [])
 
         person = PersonID(
             fullbody_embedding=full_body_embedding,
-            face_embedding=face_embed,
             fullbody_bbox=bbox,
-            face_bbox=face,
             body_conf=confidence,
-            face_conf=face_confidence,
         )
         current_persons.append(person)
 
