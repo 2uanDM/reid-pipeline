@@ -1,20 +1,33 @@
 from __future__ import absolute_import, division
 
-import warnings
+import os
+from collections import OrderedDict
 
 import torch
+from rich.console import Console
 from torch import nn
 from torch.nn import functional as F
 
-__all__ = ["osnet_x1_0", "osnet_x0_75", "osnet_x0_5", "osnet_x0_25", "osnet_ibn_x1_0"]
+console = Console()
+
+__all__ = ["osnet_x1_0", "osnet_x0_75", "osnet_x0_5", "osnet_x0_25"]
+
+
+if not os.path.exists("src/assets/models/osnet"):
+    raise FileNotFoundError(
+        "It seems that the model weights are not exist in 'src/assets/models/osnet'. Please type 'make download' to download the weights first."
+    )
+
 
 pretrained_urls = {
-    "osnet_x1_0": "https://drive.google.com/uc?id=1LaG1EJpHrxdAxKnSCJ_i0u-nbxSAeiFY",
-    "osnet_x0_75": "https://drive.google.com/uc?id=1uwA9fElHOk3ZogwbeY5GkLI6QPTX70Hq",
-    "osnet_x0_5": "https://drive.google.com/uc?id=16DGLbZukvVYgINws8u8deSaOqjybZ83i",
-    "osnet_x0_25": "https://drive.google.com/uc?id=1rb8UN5ZzPKRc_xvtHlyDh-cSz88YX9hs",
-    "osnet_ibn_x1_0": "https://drive.google.com/uc?id=1sr90V6irlYYDd4_4ISU2iruoRG8J__6l",
+    "osnet_x1_0": "src/assets/models/osnet/osnet_x1_0_cuhk03_softmax/model/model.pth.tar-150",
+    "osnet_x0_75": "src/assets/models/osnet/osnet_x0_75_cuhk03_softmax/model/model.pth.tar-150",
+    "osnet_x0_5": "src/assets/models/osnet/osnet_x0_5_cuhk03_softmax/model/model.pth.tar-150",
+    "osnet_x0_25": "src/assets/models/osnet/osnet_x0_25_cuhk03_softmax/model/model.pth.tar-150",
 }
+
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 ##########
@@ -401,16 +414,24 @@ class OSNet(nn.Module):
             raise KeyError("Unsupported loss: {}".format(self.loss))
 
 
-def init_pretrained_weights(model, key=""):
+def init_pretrained_weights(model, key, **kwargs):
     """Initializes model with pretrained weights.
 
     Layers that don't match with pretrained layers in name or size are kept unchanged.
     """
-    from collections import OrderedDict
 
-    cached_file = "/home/quan/workspace/reid-pipeline/train/deep-person-reid/log/osnet_x1_0_cuhk03_softmax/model/model.pth.tar-150"
+    if key not in pretrained_urls:
+        raise KeyError(f"Pretrained model for '{key}' is not available.")
 
-    state_dict = torch.load(cached_file)
+    weight_path = pretrained_urls[key]
+
+    if torch.cuda.is_available():
+        console.log("Loading pretrained weights on GPU")
+        state_dict = torch.load(weight_path, map_location="cuda", weights_only=False)
+    else:
+        console.log("Loading pretrained weights on CPU")
+        state_dict = torch.load(weight_path, map_location="cpu", weights_only=False)
+
     if "state_dict" in state_dict:
         state_dict = state_dict["state_dict"]
 
@@ -432,21 +453,19 @@ def init_pretrained_weights(model, key=""):
     model.load_state_dict(model_dict)
 
     if len(matched_layers) == 0:
-        warnings.warn(
-            'The pretrained weights from "{}" cannot be loaded, '
+        console.log(
+            "The pretrained weights from '{}' cannot be loaded, "
             "please check the key names manually "
-            "(** ignored and continue **)".format(cached_file)
+            "(** ignored and continue **)".format(weight_path)
         )
     else:
-        print(
-            'Successfully loaded imagenet pretrained weights from "{}"'.format(
-                cached_file
-            )
+        console.log(
+            f"Successfully loaded imagenet pretrained weights from '{weight_path}'"
         )
         if len(discarded_layers) > 0:
-            print(
+            console.log(
                 "** The following layers are discarded "
-                "due to unmatched keys or layer size: {}".format(discarded_layers)
+                f"due to unmatched keys or layer size: {discarded_layers}"
             )
 
 
@@ -462,7 +481,8 @@ def osnet_x1_0(num_classes=1000, pretrained=True, loss="softmax", **kwargs):
         channels=[64, 256, 384, 512],
         loss=loss,
         **kwargs,
-    )
+    ).to(device)
+
     if pretrained:
         init_pretrained_weights(model, key="osnet_x1_0")
     return model
@@ -477,7 +497,7 @@ def osnet_x0_75(num_classes=1000, pretrained=True, loss="softmax", **kwargs):
         channels=[48, 192, 288, 384],
         loss=loss,
         **kwargs,
-    )
+    ).to(device)
     if pretrained:
         init_pretrained_weights(model, key="osnet_x0_75")
     return model
@@ -492,7 +512,7 @@ def osnet_x0_5(num_classes=1000, pretrained=True, loss="softmax", **kwargs):
         channels=[32, 128, 192, 256],
         loss=loss,
         **kwargs,
-    )
+    ).to(device)
     if pretrained:
         init_pretrained_weights(model, key="osnet_x0_5")
     return model
@@ -507,24 +527,7 @@ def osnet_x0_25(num_classes=1000, pretrained=True, loss="softmax", **kwargs):
         channels=[16, 64, 96, 128],
         loss=loss,
         **kwargs,
-    )
+    ).to(device)
     if pretrained:
         init_pretrained_weights(model, key="osnet_x0_25")
-    return model
-
-
-def osnet_ibn_x1_0(num_classes=1000, pretrained=True, loss="softmax", **kwargs):
-    # standard size (width x1.0) + IBN layer
-    # Ref: Pan et al. Two at Once: Enhancing Learning and Generalization Capacities via IBN-Net. ECCV, 2018.
-    model = OSNet(
-        num_classes,
-        blocks=[OSBlock, OSBlock, OSBlock],
-        layers=[2, 2, 2],
-        channels=[64, 256, 384, 512],
-        loss=loss,
-        IN=True,
-        **kwargs,
-    )
-    if pretrained:
-        init_pretrained_weights(model, key="osnet_ibn_x1_0")
     return model

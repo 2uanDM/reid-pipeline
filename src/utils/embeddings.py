@@ -7,7 +7,7 @@ from rich.console import Console
 
 from src.core.config import settings
 
-from .f_extraction import feature_extractor
+from .feature_extraction import feature_extractor
 from .schemas import PersonID
 
 console = Console()
