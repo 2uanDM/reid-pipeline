@@ -51,7 +51,7 @@ class MainServer:
             self.benchmark = True
         else:
             self.benchmark = False
-            
+
         self.log_step = [10, 40, 100, 200, 400]
 
     def init_receiver(self) -> bool:
@@ -320,6 +320,8 @@ class MainServer:
             elif info.get("status") == "running":
                 self.step_ids = 0
 
+                console.log(f"Frame: {frame_number} of session {session_id}")
+
                 if self.benchmark and self.step_ids in self.log_step:
                     executor: BenchmarkMultiThread = self.sessions_storage[session_id][
                         "benchmark"
@@ -335,209 +337,204 @@ class MainServer:
                     ] = data
 
                 # BATCH PROCESSING MECHANISM - Accumulate frames until the batch is full
-                console.log(
-                    f"[bold yellow][ACCUMULATING][/bold yellow] frame:{frame_number} of session [bold cyan]{session_id}[/bold cyan]"
-                )
+                # console.log(
+                #     f"[bold yellow][ACCUMULATING][/bold yellow] frame:{frame_number} of session [bold cyan]{session_id}[/bold cyan]"
+                # )
 
-                if opencv_image is not None and (
-                    not self.batch_get_embeddings_executor.queue_is_full
-                ):
-                    self.batch_get_embeddings_executor.add(
-                        image=opencv_image,
-                        detections=detections,
-                        metadata=metadata,
-                        session_id=session_id,
+                # if opencv_image is not None and (
+                #     not self.batch_get_embeddings_executor.queue_is_full
+                # ):
+                #     self.batch_get_embeddings_executor.add(
+                #         image=opencv_image,
+                #         detections=detections,
+                #         metadata=metadata,
+                #         session_id=session_id,
+                #     )
+                #     continue  # Continue accumulating until the batch is full
+
+                # # Process the batch to get embeddings
+                # # Here batch_result_frames is a list of results for each frame in the batch also sorted by the original order when they are added
+                # console.log("[bold green]Processing batch[/bold green]")
+
+                # _time = time.time()
+                # batch_result_frames = self.batch_get_embeddings_executor.process()
+                # console.print(f"Processing time: {time.time() - _time}s")
+
+                # # Continue the flow with the processed frames
+                # for frame_result in batch_result_frames:
+                #     current_persons: List[PersonID] = frame_result.get("persons", [])
+                #     metadata = frame_result.get("metadata", {})
+                #     session_id: str = frame_result.get("session_id")
+                #     frame_number: int = metadata.get("frame")
+                #     # original_image: np.ndarray = frame_result.get("original_image")
+                #     is_skipped: bool = frame_result.get("is_skipped")
+
+                video_writer: cv2.VideoWriter = self.sessions_storage[session_id][
+                    "video_writer"
+                ]
+
+                # # Detach all the embedding of current_persons
+                # for person in current_persons:
+                #     person.fullbody_embedding = (
+                #         person.fullbody_embedding.detach().cpu().numpy()
+                #     )
+
+                if not is_skipped:
+                    bodys = self.get_face_body_from_detection(opencv_image, info)
+                    current_persons = self.extract_embeddings(opencv_image, bodys)
+
+                    boxes = np.asarray(
+                        [
+                            current_person.fullbody_bbox
+                            for current_person in current_persons
+                        ]
                     )
-                    continue  # Continue accumulating until the batch is full
+                    confidences = np.asarray(
+                        [current_person.body_conf for current_person in current_persons]
+                    )
+                    track_bodys = np.asarray(
+                        [
+                            current_person.fullbody_embedding
+                            for current_person in current_persons
+                        ]
+                    )
+                    bboxes, scores, ids = bytetrack.update(
+                        boxes, confidences, track_bodys
+                    )
 
-                # Process the batch to get embeddings
-                # Here batch_result_frames is a list of results for each frame in the batch also sorted by the original order when they are added
-                console.log("[bold green]Processing batch[/bold green]")
+                    tracking_ids = np.array(ids).astype(np.int32)
+                    new_ids = np.setdiff1d(tracking_ids, tracked_ids)
+                    if new_ids.size > 0:
+                        logging.info(f"{tracking_ids}")
+                        logging.info(f"{new_ids}")
+                    actual_new_ids = []
+                    tracking_results[frame_number + 1] = []
 
-                _time = time.time()
-                batch_result_frames = self.batch_get_embeddings_executor.process()
-                console.print(f"Processing time: {time.time() - _time}s")
+                    wait = dict()
 
-                # Continue the flow with the processed frames
-                for frame_result in batch_result_frames:
-                    current_persons: List[PersonID] = frame_result.get("persons", [])
-                    metadata = frame_result.get("metadata", {})
-                    session_id: str = frame_result.get("session_id")
-                    frame_number: int = metadata.get("frame")
-                    # original_image: np.ndarray = frame_result.get("original_image")
-                    is_skipped: bool = frame_result.get("is_skipped")
-                    video_writer: cv2.VideoWriter = self.sessions_storage[session_id][
-                        "video_writer"
-                    ]
+                    if len(bboxes) > 0:
+                        persons = [
+                            current_persons[i]
+                            for i in range(len(current_persons))
+                            if confidences[i] in scores
+                        ]
+                        in_frame_not_new_ids = np.setdiff1d(tracking_ids, new_ids)
+                        logging.info(f"not new {in_frame_not_new_ids}")
+                        for i, person in enumerate(persons):
+                            person.set_id(tracking_ids[i])
+                            track_id = tracking_ids[i]
+                            wait[track_id] = 0
+                            if track_id not in new_ids:
+                                old_person = self.storage.get_person_by_id(track_id)
 
-                    # Detach all the embedding of current_persons
-                    for person in current_persons:
-                        person.fullbody_embedding = (
-                            person.fullbody_embedding.detach().cpu().numpy()
-                        )
-
-                    if not is_skipped:
-                        boxes = np.asarray(
-                            [
-                                current_person.fullbody_bbox
-                                for current_person in current_persons
-                            ]
-                        )
-                        confidences = np.asarray(
-                            [
-                                current_person.body_conf
-                                for current_person in current_persons
-                            ]
-                        )
-                        track_bodys = np.asarray(
-                            [
-                                current_person.fullbody_embedding
-                                for current_person in current_persons
-                            ]
-                        )
-                        bboxes, scores, ids = bytetrack.update(
-                            boxes, confidences, track_bodys
-                        )
-
-                        tracking_ids = np.array(ids).astype(np.int32)
-                        new_ids = np.setdiff1d(tracking_ids, tracked_ids)
-                        if new_ids.size > 0:
-                            logging.info(f"{tracking_ids}")
-                            logging.info(f"{new_ids}")
-                        actual_new_ids = []
-                        tracking_results[frame_number + 1] = []
-
-                        wait = dict()
-
-                        if len(bboxes) > 0:
-                            persons = [
-                                current_persons[i]
-                                for i in range(len(current_persons))
-                                if confidences[i] in scores
-                            ]
-                            in_frame_not_new_ids = np.setdiff1d(tracking_ids, new_ids)
-                            logging.info(f"not new {in_frame_not_new_ids}")
-                            for i, person in enumerate(persons):
-                                person.set_id(tracking_ids[i])
-                                track_id = tracking_ids[i]
-                                wait[track_id] = 0
-                                if track_id not in new_ids:
-                                    old_person = self.storage.get_person_by_id(track_id)
-
-                                    old_person.add_fullbody_embeddings(
-                                        person.fullbody_embedding, person.body_conf
-                                    )
-
-                                elif frame_number == 0:
-                                    person.set_id(tracking_ids[i])
-                                    self.storage.add(person)
-                                    actual_new_ids.append(tracking_ids[i])
-
-                                    person.add_fullbody_embeddings(
-                                        person.fullbody_embedding, person.body_conf
-                                    )
-
-                                elif track_id in new_ids:
-                                    logging.info(f"confidence: {person.body_conf}")
-
-                                    wait[track_id] += 1
-                                    if person.body_conf > 0.7:
-                                        most_match, min_similarity = (
-                                            self.storage.search(
-                                                person,
-                                                in_frame_not_new_ids,
-                                                threshold=0.25,
-                                            )
-                                        )
-                                        if most_match:
-                                            old_id = tracking_ids[i]
-                                            new_id = most_match.id
-                                            in_frame_not_new_ids = np.append(
-                                                in_frame_not_new_ids, new_id
-                                            )
-                                            person.set_id(most_match.id)
-                                            self.remap_bytetracker_ids(
-                                                bytetrack, old_id, new_id
-                                            )
-                                            old_person = self.storage.get_person_by_id(
-                                                new_id
-                                            )
-
-                                            old_person.add_fullbody_embeddings(
-                                                person.fullbody_embedding,
-                                                person.body_conf,
-                                            )
-
-                                        else:
-                                            person.set_id(tracking_ids[i])
-                                            self.storage.add(person)
-                                            actual_new_ids.append(tracking_ids[i])
-                                            in_frame_not_new_ids = np.append(
-                                                in_frame_not_new_ids, tracking_ids[i]
-                                            )
-
-                                            person.add_fullbody_embeddings(
-                                                person.fullbody_embedding,
-                                                person.body_conf,
-                                            )
-
-                                tracking_ids[i] = person.id
-                                tracking_results[frame_number + 1].append(
-                                    {
-                                        "track_id": tracking_ids[i],
-                                        "x_min": bboxes[i][0],
-                                        "y_min": bboxes[i][1],
-                                        "x_max": bboxes[i][2],
-                                        "y_max": bboxes[i][3],
-                                        "confidence": scores[i],
-                                    }
+                                old_person.add_fullbody_embeddings(
+                                    person.fullbody_embedding, person.body_conf
                                 )
-                            logging.info(f"Tracking id: {tracking_ids}")
-                            tracked_ids = np.concatenate((tracked_ids, actual_new_ids))
-                            logging.info(f"Tracked_id: {tracked_ids}")
-                            self.reset_count(int(np.max(tracked_ids)))
-                            conf_scores = np.array(scores).astype(np.float64)
-                            boxes = np.array(bboxes).astype(np.float64)
+
+                            elif frame_number == 0:
+                                person.set_id(tracking_ids[i])
+                                self.storage.add(person)
+                                actual_new_ids.append(tracking_ids[i])
+
+                                person.add_fullbody_embeddings(
+                                    person.fullbody_embedding, person.body_conf
+                                )
+
+                            elif track_id in new_ids:
+                                logging.info(f"confidence: {person.body_conf}")
+
+                                wait[track_id] += 1
+                                if person.body_conf > 0.7:
+                                    most_match, min_similarity = self.storage.search(
+                                        person,
+                                        in_frame_not_new_ids,
+                                        threshold=0.25,
+                                    )
+                                    if most_match:
+                                        old_id = tracking_ids[i]
+                                        new_id = most_match.id
+                                        in_frame_not_new_ids = np.append(
+                                            in_frame_not_new_ids, new_id
+                                        )
+                                        person.set_id(most_match.id)
+                                        self.remap_bytetracker_ids(
+                                            bytetrack, old_id, new_id
+                                        )
+                                        old_person = self.storage.get_person_by_id(
+                                            new_id
+                                        )
+
+                                        old_person.add_fullbody_embeddings(
+                                            person.fullbody_embedding,
+                                            person.body_conf,
+                                        )
+
+                                    else:
+                                        person.set_id(tracking_ids[i])
+                                        self.storage.add(person)
+                                        actual_new_ids.append(tracking_ids[i])
+                                        in_frame_not_new_ids = np.append(
+                                            in_frame_not_new_ids, tracking_ids[i]
+                                        )
+
+                                        person.add_fullbody_embeddings(
+                                            person.fullbody_embedding,
+                                            person.body_conf,
+                                        )
+
+                            tracking_ids[i] = person.id
+                            tracking_results[frame_number + 1].append(
+                                {
+                                    "track_id": tracking_ids[i],
+                                    "x_min": bboxes[i][0],
+                                    "y_min": bboxes[i][1],
+                                    "x_max": bboxes[i][2],
+                                    "y_max": bboxes[i][3],
+                                    "confidence": scores[i],
+                                }
+                            )
+                        logging.info(f"Tracking id: {tracking_ids}")
+                        tracked_ids = np.concatenate((tracked_ids, actual_new_ids))
+                        logging.info(f"Tracked_id: {tracked_ids}")
+                        self.reset_count(int(np.max(tracked_ids)))
+                        conf_scores = np.array(scores).astype(np.float64)
+                        boxes = np.array(bboxes).astype(np.float64)
+                        result_img = self.draw_detection(
+                            img=opencv_image,
+                            bboxes=boxes,
+                            scores=conf_scores,
+                            ids=tracking_ids,
+                        )
+                        previous_boxes = boxes
+                        previous_scores = conf_scores
+                    else:
+                        result_img = opencv_image
+                else:
+                    if previous_boxes is not None:
+                        bboxes, scores, ids = bytetrack.update(
+                            previous_boxes, previous_scores, track_bodys=None
+                        )
+                        if len(bboxes) > 0:
                             result_img = self.draw_detection(
                                 img=opencv_image,
-                                bboxes=boxes,
-                                scores=conf_scores,
-                                ids=tracking_ids,
+                                bboxes=bboxes,
+                                scores=scores,
+                                ids=ids,
                             )
-                            previous_boxes = boxes
-                            previous_scores = conf_scores
                         else:
                             result_img = opencv_image
 
-                    else:
-                        if previous_boxes is not None:
-                            bboxes, scores, ids = bytetrack.update(
-                                previous_boxes, previous_scores, track_bodys=None
-                            )
-                            if len(bboxes) > 0:
-                                result_img = self.draw_detection(
-                                    img=opencv_image,
-                                    bboxes=bboxes,
-                                    scores=scores,
-                                    ids=ids,
-                                )
-                            else:
-                                result_img = opencv_image
-
-                    text = f"Frame: {frame_number}"
-                    cv2.putText(
-                        result_img,
-                        text,
-                        (50, 50),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        1,
-                        (0, 255, 0),
-                        1,
-                    )
-                    video_writer.write(result_img)
-
-                else:
-                    print(f"Session {session_id}")
+                text = f"Frame: {frame_number}"
+                cv2.putText(
+                    result_img,
+                    text,
+                    (50, 50),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1,
+                    (0, 255, 0),
+                    1,
+                )
+                video_writer.write(result_img)
 
             elif info.get("status") == "end":
                 # Get session data
