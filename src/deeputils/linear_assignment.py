@@ -1,6 +1,7 @@
 import numpy as np
-from app.deeputils import kalman_filter
 from scipy.optimize import linear_sum_assignment as linear_assignment
+
+from src.deeputils import kalman_filter
 
 INFTY_COST = 1e5
 

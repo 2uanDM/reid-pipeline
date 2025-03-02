@@ -1,5 +1,6 @@
-import numpy as np
 from collections import OrderedDict
+
+import numpy as np
 
 
 class TrackState:
@@ -35,7 +36,7 @@ class BaseTrack:
     def next_id():
         BaseTrack._count += 1
         return BaseTrack._count
-    
+
     def activate(self, *args):
         raise NotImplementedError
 

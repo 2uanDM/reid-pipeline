@@ -1,9 +1,11 @@
+import json
 import logging
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+import redis
 import torch
 import torch.nn.functional as F
-from numpy.linalg import norm
 from scipy.spatial.distance import cdist
 
 from src.core.config import settings
@@ -21,12 +23,15 @@ class PersonID:
         fullbody_bbox: np.ndarray,
         body_conf: np.float32,
     ):
+        self.id = None
         self.fullbody_embedding = fullbody_embedding
         self.fullbody_bbox = fullbody_bbox
         self.body_conf = body_conf
         self.ttl = settings.TIME_TO_LIVE  # Frames to live before removing from storage
         self.smooth_body = None
         self.fullbody_embeddings = None
+        self.first_embedding = None
+        self.last_embedding = None
         self.k_best = []
         self.keep = []
 
@@ -53,10 +58,6 @@ class PersonID:
             self.first_embedding = body_feature
             self.fullbody_embeddings = body_feature
             self.last_embedding = body_feature
-
-        # if body_score > self.body_conf:
-        #     self.fullbody_embeddings = body_feature
-        #     self.body_conf = body_score
 
         if body_score > 0.7:
             self.last_embedding = body_feature
@@ -98,35 +99,173 @@ class PersonID:
 
         return avg_embedding  # Chuẩn hóa về vector đơn vị
 
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert PersonID object to dictionary for Redis storage"""
 
-class PersonIDsStorage:
-    def __init__(self):
-        self.person_ids = []
+        # Helper function to handle any array-like structure safely
+        def safe_convert(obj):
+            if obj is None:
+                return None
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, torch.Tensor):  # Add this to handle PyTorch tensors
+                return obj.cpu().detach().numpy().tolist()
+            elif isinstance(obj, (list, tuple)):
+                return list(obj)
+            # Handle NumPy scalar types - using correct type names
+            elif isinstance(obj, np.integer):  # This covers all integer types
+                return int(obj)
+            elif isinstance(obj, np.floating):  # This covers all float types
+                return float(obj)
+            elif isinstance(obj, np.bool_):
+                return bool(obj)
+            else:
+                return obj
 
-    def _cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> float:
+        return {
+            "id": safe_convert(self.id),
+            "fullbody_embedding": safe_convert(self.fullbody_embedding),
+            "fullbody_bbox": safe_convert(self.fullbody_bbox),
+            "body_conf": float(self.body_conf) if self.body_conf is not None else None,
+            "ttl": safe_convert(self.ttl),
+            "fullbody_embeddings": safe_convert(self.fullbody_embeddings),
+            "first_embedding": safe_convert(self.first_embedding),
+            "last_embedding": safe_convert(self.last_embedding),
+            "k_best": [
+                (float(score), safe_convert(feature)) for score, feature in self.k_best
+            ],
+            "count": {k: safe_convert(v) for k, v in self.count.items()},
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "PersonID":
+        """Create PersonID object from dictionary"""
+
+        # Helper function to convert lists to NumPy arrays if needed
+        def safe_convert_to_np(obj):
+            if obj is None:
+                return None
+            elif isinstance(obj, list):
+                return np.array(obj)
+            return obj
+
+        # Create instance with required fields
+        instance = cls(
+            fullbody_embedding=safe_convert_to_np(data["fullbody_embedding"]),
+            fullbody_bbox=safe_convert_to_np(data["fullbody_bbox"]),
+            body_conf=np.float32(data["body_conf"]) if data["body_conf"] else None,
+        )
+
+        # Set all other fields
+        instance.id = data["id"]
+        instance.ttl = data["ttl"]
+        instance.fullbody_embeddings = safe_convert_to_np(data["fullbody_embeddings"])
+        instance.first_embedding = safe_convert_to_np(data["first_embedding"])
+        instance.last_embedding = safe_convert_to_np(data["last_embedding"])
+        instance.k_best = [
+            (float(score), safe_convert_to_np(feature))
+            for score, feature in data["k_best"]
+        ]
+        instance.count = data["count"]
+
+        return instance
+
+
+class RedisPersonIDsStorage:
+    def __init__(
+        self,
+        redis_host: str = "localhost",
+        redis_port: int = 6379,
+        redis_db: int = 0,
+        redis_prefix: str = "personid:",
+    ):
+        self.redis_client = redis.Redis(
+            host=redis_host,
+            port=redis_port,
+            db=redis_db,
+            decode_responses=False,
+        )
+        self.prefix = redis_prefix
+        # Set to track active IDs in the current frame
+        self.current_frame_ids = set()
+
+    def _person_key(self, id: int) -> str:
+        """Generate Redis key for person ID"""
+        return f"{self.prefix}{id}"
+
+    def _get_all_keys(self) -> List[str]:
+        """Get all person keys in Redis"""
+        return [key.decode() for key in self.redis_client.keys(f"{self.prefix}*")]
+
+    def _get_all_ids(self) -> List[int]:
+        """Get all person IDs in Redis"""
+        keys = self._get_all_keys()
+        return [int(key.replace(self.prefix, "")) for key in keys]
+
+    def get_person_by_id(self, id: int) -> Optional[PersonID]:
+        """Get person by ID from Redis"""
+        key = self._person_key(id)
+        data = self.redis_client.get(key)
+        if data:
+            person_dict = json.loads(data.decode())
+            return PersonID.from_dict(person_dict)
+        return None
+
+    def add(self, person_id: PersonID):
+        """Add person to Redis with TTL"""
+        if person_id.id is None:
+            raise ValueError("Person ID must be set before adding to storage")
+
+        key = self._person_key(person_id.id)
+
+        try:
+            person_dict = person_id.to_dict()
+            json_data = json.dumps(person_dict)
+            self.redis_client.set(key, json_data)
+            # Set expiration time based on TTL (converted to seconds)
+            self.redis_client.expire(key, person_id.ttl * settings.FRAME_TTL_TO_SECONDS)
+        except Exception as e:
+            logging.error(f"Error serializing person ID {person_id.id}: {str(e)}")
+            logging.error(f"Person data: {person_id.__dict__}")
+            raise
+
+    def update(self, person_id: PersonID):
+        """Update person in Redis"""
+        self.add(person_id)  # Use add method for update as well
+
+    def update_ttl(self):
         """
-        Calculate cosine similarity between two vectors
+        Update TTL for all persons in Redis
+        Note: Redis handles TTL automatically, but we need to
+        decrement our internal TTL counter as well
         """
-        return np.dot(a, b) / (norm(a) * norm(b))
+        for key in self._get_all_keys():
+            data = self.redis_client.get(key)
+            if data:
+                person_dict = json.loads(data.decode())
+                person_dict["ttl"] -= 1
 
-    def get_person_by_id(self, id):
-        for person in self.person_ids:
-            if person.id == id:
-                return person
+                if person_dict["ttl"] <= 0:
+                    # Remove from Redis if TTL is expired
+                    self.redis_client.delete(key)
+                else:
+                    # Update the TTL in Redis
+                    self.redis_client.set(key, json.dumps(person_dict))
 
     def search(
         self,
         current_person_id: PersonID,
         current_frame_id: list,
         threshold: float = 0.35,
-    ):
+    ) -> Tuple[Optional[PersonID], float]:
         """
-        Duyệt qua tất cả PersonID đã lưu và tìm ID gần nhất bằng cosine similarity.
+        Search for the most similar person in Redis using cosine similarity.
+        Keeps the same algorithm from the original implementation.
         """
         most_match = None
         min_similarity = 1.0
 
-        # Chuẩn hóa embedding hiện tại
+        # Normalize current embedding
         current_body_emb = (
             F.normalize(
                 torch.tensor(current_person_id.fullbody_embedding), dim=0
@@ -135,9 +274,28 @@ class PersonIDsStorage:
             else None
         )
 
-        for person_id in self.person_ids:
-            if person_id.id not in current_frame_id:
+        # If there's no embedding, we can't compare
+        if current_body_emb is None:
+            return None, 1.0
+
+        # Check all person IDs in Redis
+        for person_key in self._get_all_keys():
+            person_id_value = person_key.replace(self.prefix, "")
+
+            if int(person_id_value) not in current_frame_id:
+                # Get person data from Redis
+                data = self.redis_client.get(person_key)
+                if not data:
+                    continue
+
+                person_dict = json.loads(data.decode())
+                person_id = PersonID.from_dict(person_dict)
+
+                # Initialize similarity as highest possible value (worst match)
+                similarity = 1.0
+
                 if person_id.fullbody_embeddings is not None:
+                    # Calculate similarities using the same algorithm
                     person_body1 = F.normalize(
                         torch.tensor(person_id.fullbody_embeddings), dim=0
                     ).numpy()
@@ -148,18 +306,20 @@ class PersonIDsStorage:
                             person_body1.reshape(1, -1),
                             metric="cosine",
                         ),
-                    )
-                    person_body3 = F.normalize(
+                    )[0][0]  # Extract the scalar value
+
+                    person_body2 = F.normalize(
                         torch.tensor(person_id.first_embedding), dim=0
                     ).numpy()
                     per_similarity2 = np.maximum(
                         0.0,
                         cdist(
                             current_body_emb.reshape(1, -1),
-                            person_body3.reshape(1, -1),
+                            person_body2.reshape(1, -1),
                             metric="cosine",
                         ),
-                    )
+                    )[0][0]  # Extract the scalar value
+
                     person_body3 = F.normalize(
                         torch.tensor(person_id.last_embedding), dim=0
                     ).numpy()
@@ -170,15 +330,11 @@ class PersonIDsStorage:
                             person_body3.reshape(1, -1),
                             metric="cosine",
                         ),
-                    )
+                    )[0][0]  # Extract the scalar value
 
-                    # Thêm so sánh với trung bình `self.k_best`
-                    # person_k_best_emb = person_id.get_avg_k_best_embedding()
-                    # if current_body_emb is not None and person_k_best_emb is not None:
-                    #     person_k_best_emb = F.normalize(torch.tensor(person_k_best_emb), dim=0).numpy()
-                    #     per_similarity_kbest = np.maximum(0.0, cdist(current_body_emb.reshape(1, -1), person_k_best_emb.reshape(1, -1), metric='cosine'))
-                    # else:
-                    #     per_similarity_kbest = 1.0  # Nếu không có, đặt giá trị cao (ít giống)
+                    # Set similarity from per_similarity3
+                    similarity = per_similarity3
+
                 if len(person_id.k_best) > 0:
                     total = 0
                     for score, feature in person_id.k_best:
@@ -192,7 +348,7 @@ class PersonIDsStorage:
                                 person_k_best_emb.reshape(1, -1),
                                 metric="cosine",
                             ),
-                        )
+                        )[0][0]  # Extract the scalar value
                         total += per_similarity
                     res = total / len(person_id.k_best)
                     logging.info(f"person_Similarity1: {per_similarity1}")
@@ -200,9 +356,10 @@ class PersonIDsStorage:
                     logging.info(f"person_Similarity3: {per_similarity3}")
                     logging.info(f"person_Similarity_KBest: {res}")
 
-                    # Lấy trung bình các similarity score
-                    # similarity = (per_similarity1 + per_similarity3 + per_similarity2) / 3
+                    # Use the same similarity calculation as original
                     similarity = per_similarity3
+
+                # Now we can compare with the threshold
                 if similarity < min_similarity and similarity < threshold:
                     most_match = person_id
                     min_similarity = similarity
@@ -210,12 +367,8 @@ class PersonIDsStorage:
 
         return most_match, min_similarity
 
-    def add(self, person_id: PersonID):
-        self.person_ids.append(person_id)
-
-    def update_ttl(self):
-        for person_id in self.person_ids:
-            person_id.ttl -= 1
-
-            if person_id.ttl <= 0:
-                self.person_ids.remove(person_id)
+    def clear(self):
+        """Clear all person IDs from Redis"""
+        keys = self._get_all_keys()
+        if keys:
+            self.redis_client.delete(*keys)

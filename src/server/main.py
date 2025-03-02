@@ -1,14 +1,15 @@
+import base64
 import json
 import logging
 import os
 import time
 import traceback
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 
 import cv2
-import imagezmq
 import numpy as np
+from kafka import KafkaConsumer
 from rich.console import Console
 
 from src.core.config import settings
@@ -17,7 +18,7 @@ from src.deeputils.bytetracker import BYTETracker
 from src.utils.benchmark import BenchmarkMultiThread
 from src.utils.embeddings import BatchGetEmbeddingsExecutor, extract_embedding
 from src.utils.logger import Logger
-from src.utils.schemas import PersonID, PersonIDsStorage
+from src.utils.schemas import PersonID, RedisPersonIDsStorage
 
 logger = Logger(__name__)
 
@@ -29,11 +30,24 @@ class MainServer:
         self,
         **kwargs,
     ):
-        self.receiver = None
-        self.storage = PersonIDsStorage()
+        self.consumer = None
+        # Replace the in-memory storage with Redis storage
+        self.storage = RedisPersonIDsStorage(
+            redis_host=kwargs.get("redis_host", "localhost"),
+            redis_port=kwargs.get("redis_port", 6379),
+            redis_db=kwargs.get("redis_db", 0),
+            redis_prefix=kwargs.get("redis_prefix", "personid:"),
+        )
 
         # Store the video writer for each session (source) and the tracked IDs for each session
         self.sessions_storage = {}
+
+        # Kafka configuration
+        self.kafka_bootstrap_servers = kwargs.get(
+            "kafka_bootstrap_servers", "localhost:29092"
+        )
+        self.topic_name = kwargs.get("topic_name", "reid_input")
+        self.consumer_group = kwargs.get("consumer_group", "reid_server_group")
 
         # Batch processing
         self.max_batch_size = kwargs.get(
@@ -51,24 +65,69 @@ class MainServer:
             self.benchmark = True
         else:
             self.benchmark = False
-            
+
         self.log_step = [10, 40, 100, 200, 400]
 
-    def init_receiver(self) -> bool:
+    def init_kafka_consumer(self) -> bool:
         try:
-            self.receiver = imagezmq.ImageHub(
-                open_port="tcp://localhost:5555", REQ_REP=False
+            self.consumer = KafkaConsumer(
+                self.topic_name,
+                bootstrap_servers=self.kafka_bootstrap_servers,
+                auto_offset_reset="earliest",
+                enable_auto_commit=True,
+                group_id=self.consumer_group,
+                value_deserializer=lambda x: json.loads(x.decode("utf-8")),
+                # Configure consumer for reliability
+                max_poll_interval_ms=300000,  # 5 minutes
+                session_timeout_ms=30000,  # 30 seconds
+                heartbeat_interval_ms=10000,  # 10 seconds
             )
         except Exception:
             console.log(
-                f"[bold red]Error[/bold red] when initializing Image Receiver: {traceback.format_exc()}"
+                f"[bold red]Error[/bold red] when initializing Kafka Consumer: {traceback.format_exc()}"
             )
             return False
         else:
             console.log(
-                "[bold cyan]Image Receiver[/bold cyan] initialized [bold green]successfully[/bold green] :vampire:"
+                "[bold cyan]Kafka Consumer[/bold cyan] initialized [bold green]successfully[/bold green] :vampire:"
             )
             return True
+
+    def receive_message(self) -> Optional[tuple]:
+        """
+        Receive message from Kafka consumer
+
+        Returns:
+            A tuple of (message_info, opencv_image) or None if no message
+        """
+        try:
+            # Poll for a message with a timeout
+            messages = self.consumer.poll(timeout_ms=1000, max_records=1)
+
+            for topic_partition, records in messages.items():
+                if records:
+                    record = records[0]  # Get the first record
+                    message = record.value
+
+                    # Convert base64 image data to OpenCV image if present
+                    opencv_image = None
+                    if "frame" in message:
+                        image_data = base64.b64decode(message["frame"])
+                        nparr = np.frombuffer(image_data, np.uint8)
+                        opencv_image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                        # Remove the image data from the message to avoid serialization issues
+                        del message["frame"]
+
+                    return message, opencv_image
+
+            # No message received
+            return None
+
+        except Exception:
+            console.log(
+                f"[bold red]Error[/bold red] when receiving message from Kafka: {traceback.format_exc()}"
+            )
+            return None
 
     def draw_detection(self, img, bboxes, scores, ids, mask_alpha=0.3):
         height, width = img.shape[:2]
@@ -283,7 +342,7 @@ class MainServer:
             )
 
     def run(self):
-        if not self.init_receiver():
+        if not self.init_kafka_consumer():
             return
 
         bytetrack = BYTETracker()
@@ -295,8 +354,13 @@ class MainServer:
         previous_scores = []
 
         while True:
-            info, opencv_image = self.receiver.recv_image()
-            info = json.loads(info)
+            message_data = self.receive_message()
+
+            if not message_data:
+                time.sleep(0.1)  # Small sleep to avoid CPU spinning
+                continue
+
+            info, opencv_image = message_data
 
             detections = info.get("detections")
             metadata = info.get("metadata")
@@ -319,6 +383,8 @@ class MainServer:
 
             elif info.get("status") == "running":
                 self.step_ids = 0
+
+                console.log(f"Frame: {frame_number} of session {session_id}")
 
                 if self.benchmark and self.step_ids in self.log_step:
                     executor: BenchmarkMultiThread = self.sessions_storage[session_id][
@@ -364,37 +430,30 @@ class MainServer:
                     metadata = frame_result.get("metadata", {})
                     session_id: str = frame_result.get("session_id")
                     frame_number: int = metadata.get("frame")
-                    # original_image: np.ndarray = frame_result.get("original_image")
+                    opencv_image: np.ndarray = frame_result.get("original_image")
                     is_skipped: bool = frame_result.get("is_skipped")
                     video_writer: cv2.VideoWriter = self.sessions_storage[session_id][
                         "video_writer"
                     ]
 
-                    # Detach all the embedding of current_persons
-                    for person in current_persons:
-                        person.fullbody_embedding = (
-                            person.fullbody_embedding.detach().cpu().numpy()
-                        )
-
                     if not is_skipped:
-                        boxes = np.asarray(
-                            [
-                                current_person.fullbody_bbox
-                                for current_person in current_persons
-                            ]
-                        )
-                        confidences = np.asarray(
-                            [
-                                current_person.body_conf
-                                for current_person in current_persons
-                            ]
-                        )
-                        track_bodys = np.asarray(
-                            [
-                                current_person.fullbody_embedding
-                                for current_person in current_persons
-                            ]
-                        )
+                        # bodys = self.get_face_body_from_detection(opencv_image, info)
+                        # current_persons = self.extract_embeddings(opencv_image, bodys)
+                        # Extract boxes, confidences, and embeddings from current_persons
+
+                        boxes = []
+                        confidences = []
+                        track_bodys = []
+
+                        for current_person in current_persons:
+                            boxes.append(current_person.fullbody_bbox)
+                            confidences.append(current_person.body_conf)
+                            track_bodys.append(current_person.fullbody_embedding)
+
+                        boxes = np.asarray(boxes)
+                        confidences = np.asarray(confidences)
+                        track_bodys = np.asarray(track_bodys)
+
                         bboxes, scores, ids = bytetrack.update(
                             boxes, confidences, track_bodys
                         )
@@ -467,7 +526,6 @@ class MainServer:
                                                 person.fullbody_embedding,
                                                 person.body_conf,
                                             )
-
                                         else:
                                             person.set_id(tracking_ids[i])
                                             self.storage.add(person)
@@ -508,7 +566,6 @@ class MainServer:
                             previous_scores = conf_scores
                         else:
                             result_img = opencv_image
-
                     else:
                         if previous_boxes is not None:
                             bboxes, scores, ids = bytetrack.update(
@@ -535,9 +592,6 @@ class MainServer:
                         1,
                     )
                     video_writer.write(result_img)
-
-                else:
-                    print(f"Session {session_id}")
 
             elif info.get("status") == "end":
                 # Get session data

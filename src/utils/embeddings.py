@@ -7,27 +7,36 @@ from rich.console import Console
 
 from src.core.config import settings
 
-from .f_extraction import feature_extractor
+from .feature_extraction import feature_extractor
 from .schemas import PersonID
 
 console = Console()
 
 
-def get_face_body_from_detection(image: np.ndarray, detections: list):
+def get_body_from_detection(image: np.ndarray, detections: list) -> list:
     """
     Process the detections to get body and face bounding boxes.
     """
-    faces, bodys = [], []
+    height, width = image.shape[:2]  # Get image dimensions
+    margin = 30  # Define the margin
+    bodys = []
 
     for detection in detections:
-        x, y, w, h = list(map(lambda x: int(x), detection.get("bbox")))
-        detection.update({"frame": image[y : y + h, x : x + w]})
-        face_bbox = detection.get("face", [])
-        bodys.append(detection)
-        if face_bbox:
-            faces.append(face_bbox)
+        body = {}
 
-    return faces, bodys
+        x1, y1, x2, y2 = list(map(lambda x: int(x), detection.get("bbox")))
+
+        if (x1 < margin or x2 > width - margin) and (
+            y2 > height - margin or y1 < margin
+        ):
+            continue
+
+        body["bbox"] = x1, y1, x2 - x1, y2 - y1
+        body["frame"] = image[y1:y2, x1:x2]
+        body["score"] = detection.get("score", [])
+        bodys.append(body)
+
+    return bodys
 
 
 def extract_embedding(image, async_mode: bool = False):
@@ -37,7 +46,7 @@ def extract_embedding(image, async_mode: bool = False):
     return feature_extractor.inference(image[0])
 
 
-def extract_embeddings_for_persons(image: np.ndarray, faces: list, bodys: list):
+def extract_embeddings_for_persons(image: np.ndarray, bodys: list):
     """
     Extract embeddings from the image and detections
 
@@ -58,9 +67,13 @@ def extract_embeddings_for_persons(image: np.ndarray, faces: list, bodys: list):
         # Prepare input for BYTETrack (bbox, confidence, body_embedding)
         bbox = body.get("bbox")
 
-        full_body_embedding = extract_embedding(
-            [image[bbox[1] : bbox[1] + bbox[3], bbox[0] : bbox[0] + bbox[2]]],
-            async_mode=settings.ASYNC_MODE,
+        full_body_embedding = (
+            extract_embedding(
+                [image[bbox[1] : bbox[1] + bbox[3], bbox[0] : bbox[0] + bbox[2]]],
+                async_mode=settings.ASYNC_MODE,
+            )
+            .detach()
+            .cpu()
         )
 
         confidence = body.get("score")
@@ -99,6 +112,9 @@ class BatchGetEmbeddingsExecutor:
     def __init__(self, max_batch_size: int, max_thread: int):
         self.max_batch_size = max_batch_size
         self.max_thread = max_thread
+        self.executor: ThreadPoolExecutor = ThreadPoolExecutor(
+            max_workers=self.max_thread
+        )
 
         self.queue = []
         self.frame_info = []  # Mapping from frame in queue to metadata
@@ -128,53 +144,50 @@ class BatchGetEmbeddingsExecutor:
     def process(self):
         output = []
 
-        with ThreadPoolExecutor(max_workers=self.max_thread) as executor:
-            futures = {}
+        futures = {}
 
-            for i, image in enumerate(self.queue):
-                detections = self.frame_info[i].get("detections")
-                metadata = self.frame_info[i].get("metadata")
-                session_id = self.frame_info[i].get("session_id")
-                is_skipped = self.frame_info[i].get("is_skipped")
+        for i, image in enumerate(self.queue):
+            detections = self.frame_info[i].get("detections")
+            metadata = self.frame_info[i].get("metadata")
+            session_id = self.frame_info[i].get("session_id")
+            is_skipped = self.frame_info[i].get("is_skipped")
 
-                if not is_skipped:
-                    faces, bodys = get_face_body_from_detection(
-                        image=image, detections=detections
-                    )
+            if not is_skipped:
+                bodys = get_body_from_detection(image=image, detections=detections)
 
-                    future = executor.submit(
-                        extract_embeddings_for_persons, image, faces, bodys
-                    )
+                future = self.executor.submit(
+                    extract_embeddings_for_persons, image, bodys
+                )
 
-                    futures[future] = {
+                futures[future] = {
+                    "idx": i,
+                    "original_image": image,
+                    "detections": detections,
+                    "metadata": metadata,
+                    "session_id": session_id,
+                    "is_skipped": is_skipped,
+                }
+            else:
+                console.print("[bold red]Skipped[/bold red] frame")
+                output.append(
+                    {
                         "idx": i,
                         "original_image": image,
                         "detections": detections,
                         "metadata": metadata,
                         "session_id": session_id,
                         "is_skipped": is_skipped,
-                    }
-                else:
-                    console.print("[bold red]Skipped[/bold red] frame")
-                    output.append(
-                        {
-                            "idx": i,
-                            "original_image": image,
-                            "detections": detections,
-                            "metadata": metadata,
-                            "session_id": session_id,
-                            "is_skipped": is_skipped,
-                            "persons": [],
-                        },
-                    )
+                        "persons": [],
+                    },
+                )
 
-            for future in tqdm.tqdm(
-                as_completed(futures), total=len(futures), unit="frames"
-            ):
-                info = futures[future]
-                info["persons"] = future.result()
+        for future in tqdm.tqdm(
+            as_completed(futures), total=len(futures), unit="frames"
+        ):
+            info = futures[future]
+            info["persons"] = future.result()
 
-                output.append(info)
+            output.append(info)
 
         # Sort the output by the original order
         output = sorted(output, key=lambda x: x.get("idx"))
