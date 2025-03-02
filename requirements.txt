@@ -18,3 +18,4 @@ python-json-logger
 pydantic_settings
 imagezmq
 motmetrics
+redis

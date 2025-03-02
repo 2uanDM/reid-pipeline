@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import time
@@ -6,9 +7,9 @@ import uuid
 from typing import Generator, Union
 
 import cv2
-import imagezmq
 import numpy as np
 import torch
+from kafka import KafkaProducer
 from rich.console import Console
 from typing_extensions import Literal
 from ultralytics import YOLOv10
@@ -24,7 +25,12 @@ logger = Logger(__name__)
 
 
 class BaseEdgeDevice:
-    def __init__(self, source: str, server_address: str = "localhost:5555"):
+    def __init__(
+        self,
+        source: str,
+        kafka_bootstrap_servers: str = "localhost:29092",
+        topic_name: str = "reid_input",
+    ):
         """
         Base class for edge devices
 
@@ -33,10 +39,14 @@ class BaseEdgeDevice:
             - Video: "video.mp4"
             - Stream: "rtsp://example.com/media.mp4"
             - Folder: "folder/" (containing videos)
+        :param kafka_bootstrap_servers: Kafka bootstrap servers address
+        :param topic_name: Kafka topic to publish messages to
         """
         self.source = source
         self.model = self._load_yolo_model()
-        self.server_address = server_address
+        self.kafka_bootstrap_servers = kafka_bootstrap_servers
+        self.topic_name = topic_name
+        self.producer = None
 
     def log(
         self,
@@ -266,21 +276,44 @@ class BaseEdgeDevice:
         else:
             return False
 
-    def init_sender(self) -> bool:
+    def init_kafka_producer(self) -> bool:
         try:
-            self.sender = imagezmq.ImageSender(
-                connect_to=settings.SERVER_ADDR, REQ_REP=False
+            self.producer = KafkaProducer(
+                bootstrap_servers=self.kafka_bootstrap_servers,
+                value_serializer=lambda v: json.dumps(v).encode("utf-8"),
+                # Adding retry and delivery guarantees
+                retries=5,
+                acks="all",
             )
         except Exception:
             console.print(
-                f"[bold red]Error[/bold red] when initializing Image Sender: {traceback.format_exc()}"
+                f"[bold red]Error[/bold red] when initializing Kafka Producer: {traceback.format_exc()}"
             )
             return False
         else:
             console.print(
-                "[bold cyan]Image Sender[/bold cyan] initialized [bold green]successfully[/bold green] :vampire:"
+                "[bold cyan]Kafka Producer[/bold cyan] initialized [bold green]successfully[/bold green] :vampire:"
             )
             return True
+
+    def send_to_kafka(self, message: dict, frame: np.ndarray = None) -> None:
+        """
+        Send message and frame to Kafka topic
+        """
+        try:
+            # If frame is provided, encode it to base64
+            if frame is not None and frame.size > 0:
+                _, buffer = cv2.imencode(".jpg", frame)
+                message["frame"] = base64.b64encode(buffer).decode("utf-8")
+
+            # Send message to Kafka topic
+            self.producer.send(self.topic_name, message)
+            # Make sure the message gets sent without delay
+            self.producer.flush()
+        except Exception:
+            console.print(
+                f"[bold red]Error[/bold red] when sending to Kafka: {traceback.format_exc()}"
+            )
 
     def get_start_stop_msg(
         self,
@@ -288,32 +321,26 @@ class BaseEdgeDevice:
         is_start: bool,
         session_id: str,
         summary: Union[dict, None] = None,
-    ) -> tuple:
+    ) -> dict:
         if is_start:
-            msg = json.dumps(
-                {
-                    "session_id": session_id,
-                    "status": "start",
-                    "metadata": {
-                        "source": self.source,
-                        "fps": cap.get(cv2.CAP_PROP_FPS),
-                        "length": cap.get(cv2.CAP_PROP_FRAME_COUNT),
-                        "shape": (
-                            cap.get(cv2.CAP_PROP_FRAME_WIDTH),
-                            cap.get(cv2.CAP_PROP_FRAME_HEIGHT),
-                        ),
-                    },
-                }
-            )
-
-            return msg, np.zeros((640, 480, 3), np.uint8)
+            return {
+                "session_id": session_id,
+                "status": "start",
+                "metadata": {
+                    "source": self.source,
+                    "fps": cap.get(cv2.CAP_PROP_FPS),
+                    "length": cap.get(cv2.CAP_PROP_FRAME_COUNT),
+                    "shape": (
+                        cap.get(cv2.CAP_PROP_FRAME_WIDTH),
+                        cap.get(cv2.CAP_PROP_FRAME_HEIGHT),
+                    ),
+                },
+            }
         else:
-            return json.dumps(
-                {"session_id": session_id, "status": "end", "summary": summary}
-            ), np.zeros((640, 480, 3), np.uint8)
+            return {"session_id": session_id, "status": "end", "summary": summary}
 
     def run(self):
-        if not self.init_sender():
+        if not self.init_kafka_producer():
             return
 
         output_video_path = "output/output_vid1.mp4"
@@ -328,7 +355,7 @@ class BaseEdgeDevice:
             output_video_path, fourcc, fps, (frame_width, frame_height)
         )
 
-        # Warmup the server
+        # Warmup before starting
         time.sleep(2)
 
         prev_frame = None
@@ -340,11 +367,11 @@ class BaseEdgeDevice:
         session_id = uuid.uuid4().hex
 
         total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-        self.sender.send_image(
-            *self.get_start_stop_msg(cap, is_start=True, session_id=session_id)
+        self.send_to_kafka(
+            self.get_start_stop_msg(cap, is_start=True, session_id=session_id), None
         )
 
-        # Warmup the server
+        # Warmup after sending initial message
         time.sleep(2)
 
         for idx, (cap, frame) in enumerate(self.read_source()):
@@ -359,41 +386,37 @@ class BaseEdgeDevice:
                 output, criterion, frame_limit = self.detect(idx, frame)
 
                 frame_count += 1
-                msg = json.dumps(
-                    {
-                        "session_id": session_id,
-                        "status": "running",
-                        "metadata": metadata,
-                        "is_skipped": False,
-                        "detections": output,
-                    }
-                )
+                message = {
+                    "session_id": session_id,
+                    "status": "running",
+                    "metadata": metadata,
+                    "is_skipped": False,
+                    "detections": output,
+                }
                 prev_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 frame_count = 0
-                self.sender.send_image(msg, frame)
+                self.send_to_kafka(message, frame)
                 out_video.write(frame)
 
             else:
                 frame_count += 1
                 skipped_frames += 1
-                msg = json.dumps(
-                    {
-                        "session_id": session_id,
-                        "status": "running",
-                        "metadata": metadata,
-                        "is_skipped": True,
-                        "detections": [],
-                    }
-                )
+                message = {
+                    "session_id": session_id,
+                    "status": "running",
+                    "metadata": metadata,
+                    "is_skipped": True,
+                    "detections": [],
+                }
 
-                self.sender.send_image(msg, frame)
+                self.send_to_kafka(message, frame)
                 out_video.write(frame)
 
         out_video.release()
         print(time.time() - time_start)
 
-        self.sender.send_image(
-            *self.get_start_stop_msg(
+        self.send_to_kafka(
+            self.get_start_stop_msg(
                 cap,
                 is_start=False,
                 session_id=session_id,
@@ -402,7 +425,12 @@ class BaseEdgeDevice:
                     "skipped_frames": skipped_frames,
                     "total_frames": int(total_frames),
                 },
-            )
+            ),
+            None,
         )
+
+        # Close Kafka producer properly
+        if self.producer is not None:
+            self.producer.close()
 
         cap.release()
