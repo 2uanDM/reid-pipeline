@@ -8,6 +8,8 @@ services:
     ports:
       - "2181:2181"
     restart: unless-stopped
+    networks:
+      - reid
 
   kafka:
     image: bitnami/kafka:3.7.0
@@ -22,13 +24,31 @@ services:
       KAFKA_CFG_INTER_BROKER_LISTENER_NAME: INTERNAL
       KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
       ALLOW_PLAINTEXT_LISTENER: "yes"
-    ports:
+      KAFKA_JMX_PORT: 7071
+      KAFKA_OPTS: "-javaagent:/jmx_exporter/jmx_prometheus_javaagent-0.20.0.jar=7071:/jmx_exporter/kafka-2_0_0.yml"
+      KAFKA_CLUSTER_ID: "Ty6tjpQ0QKehRzmKaMVNfg"
+    ports:  
       - "9092:9092"
       - "29092:29092"
+      - "7071:7071"
     volumes:
       - kafka_data:/bitnami/kafka
+      - ./jmx-exporter:/jmx_exporter
     restart: unless-stopped
+    networks:
+      - reid
 
+  redis:
+    image: bitnami/redis:latest
+    environment:
+      - ALLOW_EMPTY_PASSWORD=yes
+      - REDIS_PORT_NUMBER=6379
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    networks:
+      - reid
+  
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
     depends_on:
@@ -40,15 +60,43 @@ services:
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
       KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
     restart: unless-stopped
+    networks:
+      - reid
 
-  redis:
-    image: bitnami/redis:latest
-    environment:
-      - ALLOW_EMPTY_PASSWORD=yes
-      - REDIS_PORT_NUMBER=6379
+  kafka-exporter:
+    image: danielqsj/kafka-exporter
+    depends_on:
+      - kafka
     ports:
-      - "6379:6379"
+      - "9308:9308"
+    command:
+      - '--kafka.server=kafka:9092'
+    restart: unless-stopped
+    networks:
+      - reid
+
+  prometheus:
+    image: prom/prometheus
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+    networks:
+      - reid
+
+  grafana:
+    image: grafana/grafana
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    networks:
+      - reid
 
 volumes:
   kafka_data:
     driver: local
+  
+networks:
+  reid:
+    driver: bridge

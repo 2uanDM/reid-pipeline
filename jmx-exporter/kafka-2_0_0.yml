@@ -1,0 +1,50 @@
+startDelaySeconds: 0
+lowercaseOutputName: true
+lowercaseOutputLabelNames: true
+
+rules:
+  - pattern: 'kafka.server<type=(.+), name=(.+)PerSec, topic=(.+)><>Count'
+    name: kafka_$1_$2_total
+    labels:
+      topic: "$3"
+    type: COUNTER
+
+  - pattern: 'kafka.server<type=(.+), name=(.+)PerSec><>Count'
+    name: kafka_$1_$2_total
+    type: COUNTER
+
+  - pattern: 'kafka.server<type=(.+), name=(.+)><>Mean'
+    name: kafka_$1_$2_mean
+    type: GAUGE
+
+  - pattern: 'kafka.server<type=(.+), name=(.+)><>Value'
+    name: kafka_$1_$2
+    type: GAUGE
+
+  - pattern: 'kafka.network<type=(.+), name=(.+)><>Count'
+    name: kafka_network_$2_total
+    type: COUNTER
+
+  - pattern: 'kafka.log<type=(.+), name=(.+)><>Value'
+    name: kafka_log_$2
+    type: GAUGE
+
+  - pattern: 'kafka.controller<type=(.+), name=(.+)><>Value'
+    name: kafka_controller_$2
+    type: GAUGE
+
+  - pattern: 'kafka.cluster<type=(.+), name=(.+)><>Value'
+    name: kafka_cluster_$2
+    type: GAUGE
+
+  - pattern: 'kafka.server<type=BrokerTopicMetrics, name=(.+)><>Count'
+    name: kafka_brokertopicmetrics_$1_total
+    type: COUNTER
+
+  - pattern: 'kafka.server<type=BrokerTopicMetrics, name=(.+)><>MeanRate'
+    name: kafka_brokertopicmetrics_$1_meanrate
+    type: GAUGE
+
+  - pattern: 'kafka.server<type=BrokerTopicMetrics, name=(.+)><>OneMinuteRate'
+    name: kafka_brokertopicmetrics_$1_oneminuterate
+    type: GAUGE
